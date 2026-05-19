@@ -16,15 +16,18 @@ Key references inside the paper:
     M_{t+1} = M_t + v_{t+1} k_{t+1}^T.
   * Eq. 88 / 92 / 93: general self-referential Titans update rule with a
     Hebbian decay term k k^T M.
+  * Eq. 70 - 71 (§7.1): Continuum Memory System (CMS) — a chain of memory
+    blocks with per-bank update frequencies C^(l).
 
-The classes here are intentionally small and side-effectful; they keep their
-state in a single `tf.Variable` so that a `SelfModifyingLayer` can write to
-them token by token inside a forward pass.
+The classes here are intentionally small and side-effectful; they keep
+their state in a single ``tf.Variable`` so a SelfModifyingLayer can write
+to them token by token inside a forward pass.
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from dataclasses import dataclass
+from typing import Literal, Sequence
 
 import tensorflow as tf
 
@@ -35,8 +38,9 @@ _VALID_RULES = ("hebbian", "delta", "oja")
 class AssociativeMemory(tf.Module):
     """Matrix-valued associative memory with selectable update rules.
 
-    The memory state is a single matrix ``M`` of shape ``(value_dim, key_dim)``.
-    Each ``write(k, v)`` call mutates it under one of three rules:
+    The memory state is a single matrix ``M`` of shape
+    ``(value_dim, key_dim)``. Each ``write(k, v)`` call mutates it under
+    one of three rules:
 
     * ``hebbian`` -- Eq. 18::
 
@@ -58,13 +62,6 @@ class AssociativeMemory(tf.Module):
 
       Unlike the plain delta rule, the extra decay term keeps ``||M||``
       bounded for arbitrary key streams.
-
-    Args:
-        key_dim: dimension of the key vector ``k``.
-        value_dim: dimension of the value vector ``v``.
-        rule: one of ``"hebbian"``, ``"delta"``, ``"oja"``.
-        learning_rate: scalar step size ``lr`` applied to every write.
-        name: optional ``tf.Module`` name.
     """
 
     def __init__(
@@ -117,21 +114,13 @@ class AssociativeMemory(tf.Module):
                 delta = -self.learning_rate * err_outer
             else:  # oja
                 kk = tf.einsum("a,b->ab", k, k)  # k k^T, shape (key_dim, key_dim)
-                decay = tf.matmul(self.memory, kk)  # M (k k^T), shape (value_dim, key_dim)
+                decay = tf.matmul(self.memory, kk)  # M (k k^T)
                 delta = -self.learning_rate * err_outer - self.learning_rate * decay
         self.memory.assign_add(delta)
         return self.memory
 
     def write_batch(self, keys: tf.Tensor, values: tf.Tensor) -> tf.Tensor:
-        """Apply a sequence of writes in chronological order.
-
-        Args:
-            keys: shape ``(T, key_dim)``.
-            values: shape ``(T, value_dim)``.
-
-        Returns:
-            The memory state after the last write.
-        """
+        """Apply a sequence of writes in chronological order."""
         keys = tf.cast(keys, tf.float32)
         values = tf.cast(values, tf.float32)
         if int(keys.shape[0]) != int(values.shape[0]):
@@ -139,3 +128,100 @@ class AssociativeMemory(tf.Module):
         for t in range(int(keys.shape[0])):
             self.write(keys[t], values[t])
         return self.memory
+
+
+@dataclass
+class CMSBank:
+    """A single bank inside a :class:`ContinuumMemorySystem`.
+
+    Attributes:
+        memory: backing :class:`AssociativeMemory` state.
+        update_every: chunk size ``C^(l)`` from Eq. 71 — this bank is
+            written to only on steps where ``step_index % update_every == 0``.
+        decay: per-step multiplicative shrink applied to the memory
+            (analogue of the gate ``alpha`` in Eq. 88; here used at the
+            CMS-bank granularity rather than per individual key).
+    """
+
+    memory: AssociativeMemory
+    update_every: int
+    decay: float
+
+
+class ContinuumMemorySystem(tf.Module):
+    """Continuum Memory System (CMS).
+
+    Reference: §7.1 of the paper.
+
+    Implements Eq. 70 (sequential composition of MLP / memory blocks)
+    and Eq. 71 (per-bank update frequency ``C^(l)``). Banks are run in
+    order: bank 0 sees the input, bank ``i+1`` sees bank ``i``'s
+    retrieval. On every step we:
+
+      1. apply each bank's multiplicative decay (per-step shrink),
+      2. write the current token-shaped vector into the bank if the
+         current step index is divisible by its ``update_every``,
+      3. retrieve from the bank to produce the input for the next bank.
+
+    The faster banks (small ``update_every``) react to every token and
+    accumulate short-term context; slower banks accumulate persistent
+    structure across many steps and barely change. This is the
+    catastrophic-forgetting protection described in §7.1.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        update_every: Sequence[int] = (1, 4, 16),
+        decays: Sequence[float] = (0.01, 0.005, 0.001),
+        rule: UpdateRule = "hebbian",
+        learning_rate: float = 1.0,
+        name: str | None = None,
+    ) -> None:
+        super().__init__(name=name)
+        if len(update_every) != len(decays):
+            raise ValueError("update_every and decays must be the same length")
+        if len(update_every) == 0:
+            raise ValueError("CMS requires at least one bank")
+        self.dim = int(dim)
+        self.rule = rule
+        self.banks: list[CMSBank] = [
+            CMSBank(
+                memory=AssociativeMemory(
+                    key_dim=self.dim,
+                    value_dim=self.dim,
+                    rule=rule,
+                    learning_rate=learning_rate,
+                    name=f"bank_{i}",
+                ),
+                update_every=int(ue),
+                decay=float(d),
+            )
+            for i, (ue, d) in enumerate(zip(update_every, decays))
+        ]
+
+    def reset(self) -> None:
+        """Zero every bank's memory."""
+        for b in self.banks:
+            b.memory.reset()
+
+    def forward_step(self, token: tf.Tensor, step_index: int) -> tf.Tensor:
+        """Push one token through the bank chain; return the final retrieval."""
+        x = tf.cast(token, tf.float32)
+        if int(x.shape[-1]) != self.dim:
+            raise ValueError(f"token last dim {int(x.shape[-1])} != dim {self.dim}")
+        for b in self.banks:
+            if b.decay > 0:
+                b.memory.memory.assign(b.memory.memory * (1.0 - b.decay))
+            if step_index % b.update_every == 0:
+                b.memory.write(x, x)
+            x = b.memory.retrieve(x)
+        return x
+
+    def forward_sequence(self, tokens: tf.Tensor) -> tf.Tensor:
+        """Apply :meth:`forward_step` to a sequence of shape ``(T, dim)``."""
+        tokens = tf.cast(tokens, tf.float32)
+        outs = []
+        for t in range(int(tokens.shape[0])):
+            outs.append(self.forward_step(tokens[t], t))
+        return tf.stack(outs, axis=0)
