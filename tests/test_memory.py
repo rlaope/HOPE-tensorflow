@@ -1,11 +1,11 @@
-"""Unit tests for hope.memory.AssociativeMemory."""
+"""Unit tests for hope.memory."""
 
 from __future__ import annotations
 
 import numpy as np
 import tensorflow as tf
 
-from hope.memory import AssociativeMemory
+from hope.memory import AssociativeMemory, ContinuumMemorySystem
 
 
 def test_hebbian_matches_outer_product():
@@ -49,3 +49,30 @@ def test_reset_zeros_memory():
     assert float(tf.norm(mem.memory)) > 0
     mem.reset()
     assert float(tf.norm(mem.memory)) == 0
+
+
+def test_cms_high_freq_bank_changes_more_than_low_freq():
+    """Bank with update_every=1 must accumulate more change than update_every=16
+    under identical input — verifies the Eq. 71 frequency gating."""
+    tf.random.set_seed(0)
+    cms = ContinuumMemorySystem(
+        dim=4,
+        update_every=(1, 16),
+        decays=(0.0, 0.0),
+        rule="hebbian",
+        learning_rate=0.1,
+    )
+    tokens = tf.random.normal((50, 4))
+    for t in range(50):
+        cms.forward_step(tokens[t], t)
+    fast_norm = float(tf.norm(cms.banks[0].memory.memory))
+    slow_norm = float(tf.norm(cms.banks[1].memory.memory))
+    assert fast_norm > slow_norm, (
+        f"fast bank should accumulate more than slow bank: {fast_norm} vs {slow_norm}"
+    )
+
+
+def test_cms_forward_sequence_shape():
+    cms = ContinuumMemorySystem(dim=3, update_every=(1, 4), decays=(0.0, 0.0))
+    out = cms.forward_sequence(tf.random.normal((10, 3)))
+    assert tuple(out.shape) == (10, 3)
