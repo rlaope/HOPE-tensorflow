@@ -29,17 +29,20 @@ import tensorflow as tf
 
 
 class DGD:
-    """Delta Gradient Descent (DGD).
+    """SGD with explicit weight decay, framed as a didactic stand-in
+    for the paper's Delta Gradient Descent (DGD, §4.5).
 
-    Reference: §4.5 and Eq. 31. Standard gradient descent updates a slow
-    weight as ``w <- w - lr * grad``. DGD adds a multiplicative decay
-    term inspired by the ``(k k^T) M`` term that appears in the
-    self-referential Titans update (Eq. 88):
+    Update rule (echoes Eq. 31 plus the ``(k k^T) M`` decay term that
+    appears in the self-referential Titans update of Eq. 88)::
 
         w <- w - lr * grad - lr * decay * w
 
-    Equivalent to SGD with explicit per-step weight decay. The
-    formulation hides nothing -- it is exactly the update rule above.
+    Equivalent to vanilla SGD with explicit per-step weight decay. The
+    paper's full DGD has a *data-dependent* decay term that compresses
+    recent inputs into the update rule; here ``decay`` is held constant
+    per call so the API stays a tiny drop-in replacement for SGD inside
+    a ``tf.GradientTape`` loop. To recover the paper's variant, swap
+    ``self.decay`` for a function of recent gradients or inputs.
     """
 
     def __init__(self, learning_rate: float = 1e-3, decay: float = 0.0) -> None:
