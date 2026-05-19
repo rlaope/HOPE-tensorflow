@@ -1,0 +1,10 @@
+tensorflow>=2.15
+numpy
+matplotlib
+tqdm
+
+# dev
+pytest>=7
+black>=24
+jupyter
+nbconvert
