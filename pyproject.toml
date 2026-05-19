@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hope-tensorflow"
-version = "0.0.1"
+version = "0.1.0"
 description = "A TensorFlow / Keras implementation of HOPE from 'Nested Learning: The Illusion of Deep Learning Architectures' (Behrouz et al., NeurIPS 2025)."
 readme = "README.md"
 license = { file = "LICENSE" }
