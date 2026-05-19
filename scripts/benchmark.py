@@ -87,18 +87,23 @@ def _eval_mean_loss(model, batches, max_batches: int = 5) -> float:
 
 
 def scenario_longctx(args) -> dict:
-    """Plant a (key, value) pair at the start, query it near the end."""
+    """Plant a (key, value) pair at the start, query it near the end.
+
+    Metric: mean probability the model assigns to ``val_id`` at the
+    recall position. Softer than argmax accuracy so the comparison is
+    visible on a tiny CPU-friendly training budget.
+    """
     rng = np.random.default_rng(0)
-    vocab = 32
+    vocab = 8
     n_heads = 2
     d_model = 32
 
     results: dict[str, dict[int, float]] = {"hope": {}, "transformer": {}}
     for seq_len in args.longctx_seq_lens:
         B = args.batch_size
-        key_id = int(rng.integers(1, 9))
-        val_id = int(rng.integers(9, 17))
-        x = rng.integers(17, vocab, size=(B, seq_len), dtype=np.int32)
+        key_id = int(rng.integers(1, 4))
+        val_id = int(rng.integers(4, vocab))
+        x = rng.integers(0, 4, size=(B, seq_len), dtype=np.int32)
         x[:, 0] = key_id
         x[:, 1] = val_id
         x[:, -2] = key_id
@@ -121,17 +126,19 @@ def scenario_longctx(args) -> dict:
                 grads = tape.gradient(loss, model.trainable_variables)
                 opt.apply_gradients(zip(grads, model.trainable_variables))
             logits = model(x_t)
-            preds = tf.argmax(logits[:, -2, :], axis=-1).numpy()
-            acc = float(np.mean(preds == val_id))
-            results[name][seq_len] = acc
-            print(f"[longctx] seq_len={seq_len} {name}: acc={acc:.3f}")
+            probs = tf.nn.softmax(logits[:, -2, :], axis=-1).numpy()
+            prob_correct = float(np.mean(probs[:, val_id]))
+            results[name][seq_len] = prob_correct
+            print(
+                f"[longctx] seq_len={seq_len} {name}: P(val_id)={prob_correct:.3f}"
+            )
 
     fig, ax = plt.subplots(figsize=(7, 4))
     sls = sorted(args.longctx_seq_lens)
     for name in ("hope", "transformer"):
         ax.plot(sls, [results[name][s] for s in sls], marker="o", label=name)
     ax.set_xlabel("sequence length")
-    ax.set_ylabel("recall accuracy")
+    ax.set_ylabel("P(val_id | context) at recall position")
     ax.set_title("Long-context retrieval (synthetic key/value)")
     ax.set_ylim(-0.05, 1.05)
     ax.legend()
@@ -190,50 +197,63 @@ def scenario_continual(args) -> dict:
 
 
 def scenario_incontext(args) -> dict:
-    """Show k (src, perm[src]) pairs in the prompt; ask for perm[query]."""
+    """Show k (src, perm[src]) pairs in the prompt; ask for perm[query].
+
+    Averages over many random permutations per k so the plot reports a
+    probability instead of a single binary flip.
+    """
     rng = np.random.default_rng(0)
-    vocab = 16
+    vocab = 8
     n_heads = 2
     d_model = 32
     shots = (1, 2, 4)
-    perm = rng.permutation(vocab).astype(np.int32)
+    n_trials = int(args.incontext_trials)
 
     results: dict[str, dict[int, float]] = {"hope": {}, "transformer": {}}
     for k in shots:
-        src_examples = rng.integers(0, vocab, size=k)
-        prompt: list[int] = []
-        for s in src_examples:
-            prompt.extend([int(s), int(perm[s])])
-        q = int(rng.integers(0, vocab))
-        prompt.append(q)
-        prompt.append(int(perm[q]))
-        x_arr = np.array(prompt, dtype=np.int32)[None, :]
-        T = x_arr.shape[1]
-        seq_len = max(T, 8)
-        if seq_len > T:
-            pad = rng.integers(0, vocab, size=(1, seq_len - T)).astype(np.int32)
-            x_arr = np.concatenate([x_arr, pad], axis=1)
-        x_t = tf.constant(x_arr, dtype=tf.int32)
-        y_t = x_t
+        per_trial: dict[str, list[float]] = {"hope": [], "transformer": []}
+        for trial in range(n_trials):
+            perm = rng.permutation(vocab).astype(np.int32)
+            src_examples = rng.integers(0, vocab, size=k)
+            prompt: list[int] = []
+            for s in src_examples:
+                prompt.extend([int(s), int(perm[s])])
+            q = int(rng.integers(0, vocab))
+            prompt.append(q)
+            prompt.append(int(perm[q]))
+            x_arr = np.array(prompt, dtype=np.int32)[None, :]
+            T = x_arr.shape[1]
+            seq_len = max(T, 8)
+            if seq_len > T:
+                pad = rng.integers(0, vocab, size=(1, seq_len - T)).astype(np.int32)
+                x_arr = np.concatenate([x_arr, pad], axis=1)
+            x_t = tf.constant(x_arr, dtype=tf.int32)
+            y_t = x_t
+
+            for name in ("hope", "transformer"):
+                if name == "hope":
+                    model = _build_hope(vocab, seq_len, d_model, n_heads)
+                else:
+                    ref = _build_hope(vocab, seq_len, d_model, n_heads)
+                    model = _build_matched_baseline(ref)
+                _ = model(tf.zeros((1, seq_len), dtype=tf.int32))
+                opt = tf.keras.optimizers.Adam(args.lr)
+                for _ in range(args.incontext_train_steps):
+                    with tf.GradientTape() as tape:
+                        logits = model(x_t)
+                        loss = _ce_loss(logits, y_t)
+                    grads = tape.gradient(loss, model.trainable_variables)
+                    opt.apply_gradients(zip(grads, model.trainable_variables))
+                logits = model(x_t)
+                pred_at_q = int(tf.argmax(logits[0, T - 2, :]).numpy())
+                per_trial[name].append(1.0 if pred_at_q == int(perm[q]) else 0.0)
 
         for name in ("hope", "transformer"):
-            if name == "hope":
-                model = _build_hope(vocab, seq_len, d_model, n_heads)
-            else:
-                ref = _build_hope(vocab, seq_len, d_model, n_heads)
-                model = _build_matched_baseline(ref)
-            _ = model(tf.zeros((1, seq_len), dtype=tf.int32))
-            opt = tf.keras.optimizers.Adam(args.lr)
-            for _ in range(args.incontext_train_steps):
-                with tf.GradientTape() as tape:
-                    logits = model(x_t)
-                    loss = _ce_loss(logits, y_t)
-                grads = tape.gradient(loss, model.trainable_variables)
-                opt.apply_gradients(zip(grads, model.trainable_variables))
-            logits = model(x_t)
-            pred_at_q = int(tf.argmax(logits[0, T - 2, :]).numpy())
-            results[name][k] = 1.0 if pred_at_q == int(perm[q]) else 0.0
-            print(f"[incontext] k={k} {name}: ok={results[name][k]==1.0}")
+            mean_acc = float(np.mean(per_trial[name]))
+            results[name][k] = mean_acc
+            print(
+                f"[incontext] k={k} {name}: acc={mean_acc:.3f} over {n_trials} trials"
+            )
 
     fig, ax = plt.subplots(figsize=(7, 4))
     for name in ("hope", "transformer"):
@@ -263,8 +283,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--steps", type=int, default=50)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--longctx-seq-lens", type=int, nargs="+", default=[64, 256])
-    p.add_argument("--longctx-train-steps", type=int, default=30)
-    p.add_argument("--incontext-train-steps", type=int, default=10)
+    p.add_argument("--longctx-train-steps", type=int, default=200)
+    p.add_argument("--incontext-train-steps", type=int, default=20)
+    p.add_argument("--incontext-trials", type=int, default=8)
     return p
 
 
