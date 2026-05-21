@@ -60,8 +60,14 @@ class AssociativeMemory(tf.Module):
 
           M <- M - lr * (M k - v) k^T - lr * (k k^T) M
 
-      Unlike the plain delta rule, the extra decay term keeps ``||M||``
-      bounded for arbitrary key streams.
+      The extra decay term has per-step gain ``lr * ||k||^2`` applied to
+      ``M``. For unit-scale keys (``||k|| ~ 1``) and ``lr <= 0.1`` this
+      keeps ``||M||`` bounded; for keys with large norm the step can
+      overshoot and the iteration diverges. Callers feeding wide-dynamic-
+      range keys should either normalise keys before ``write`` or scale
+      ``learning_rate`` down by roughly ``1 / max(||k||^2, 1)``. The
+      ``test_oja_handles_large_norm_keys`` regression test pins this
+      limitation as a known boundary of the implementation.
     """
 
     def __init__(
@@ -70,6 +76,7 @@ class AssociativeMemory(tf.Module):
         value_dim: int,
         rule: UpdateRule = "hebbian",
         learning_rate: float = 1.0,
+        dtype: tf.DType = tf.float32,
         name: str | None = None,
     ) -> None:
         super().__init__(name=name)
@@ -79,8 +86,9 @@ class AssociativeMemory(tf.Module):
         self.value_dim = int(value_dim)
         self.rule = rule
         self.learning_rate = float(learning_rate)
+        self.dtype = dtype
         self.memory = tf.Variable(
-            tf.zeros((self.value_dim, self.key_dim), dtype=tf.float32),
+            tf.zeros((self.value_dim, self.key_dim), dtype=self.dtype),
             trainable=False,
             name="memory",
         )
@@ -91,13 +99,14 @@ class AssociativeMemory(tf.Module):
 
     def retrieve(self, k: tf.Tensor) -> tf.Tensor:
         """Return ``M @ k``. Accepts ``k`` of shape ``(..., key_dim)``."""
-        k = tf.cast(k, tf.float32)
+        k = tf.cast(k, self.dtype)
         return tf.einsum("vk,...k->...v", self.memory, k)
 
     def write(self, k: tf.Tensor, v: tf.Tensor) -> tf.Tensor:
         """Apply one (key, value) write and return the updated memory."""
-        k = tf.cast(k, tf.float32)
-        v = tf.cast(v, tf.float32)
+        # explicit cast to memory dtype — callers asking for fp16/bf16 should pass dtype=... at construction
+        k = tf.cast(k, self.dtype)
+        v = tf.cast(v, self.dtype)
         if int(k.shape[-1]) != self.key_dim:
             raise ValueError(f"key last dim {int(k.shape[-1])} != key_dim {self.key_dim}")
         if int(v.shape[-1]) != self.value_dim:
@@ -121,8 +130,8 @@ class AssociativeMemory(tf.Module):
 
     def write_batch(self, keys: tf.Tensor, values: tf.Tensor) -> tf.Tensor:
         """Apply a sequence of writes in chronological order."""
-        keys = tf.cast(keys, tf.float32)
-        values = tf.cast(values, tf.float32)
+        keys = tf.cast(keys, self.dtype)
+        values = tf.cast(values, self.dtype)
         if int(keys.shape[0]) != int(values.shape[0]):
             raise ValueError("keys and values must share the leading T dimension")
         for t in range(int(keys.shape[0])):
@@ -176,6 +185,7 @@ class ContinuumMemorySystem(tf.Module):
         decays: Sequence[float] = (0.01, 0.005, 0.001),
         rule: UpdateRule = "hebbian",
         learning_rate: float = 1.0,
+        dtype: tf.DType = tf.float32,
         name: str | None = None,
     ) -> None:
         super().__init__(name=name)
@@ -185,6 +195,7 @@ class ContinuumMemorySystem(tf.Module):
             raise ValueError("CMS requires at least one bank")
         self.dim = int(dim)
         self.rule = rule
+        self.dtype = dtype
         self.banks: list[CMSBank] = [
             CMSBank(
                 memory=AssociativeMemory(
@@ -192,6 +203,7 @@ class ContinuumMemorySystem(tf.Module):
                     value_dim=self.dim,
                     rule=rule,
                     learning_rate=learning_rate,
+                    dtype=dtype,
                     name=f"bank_{i}",
                 ),
                 update_every=int(ue),
@@ -207,7 +219,7 @@ class ContinuumMemorySystem(tf.Module):
 
     def forward_step(self, token: tf.Tensor, step_index: int) -> tf.Tensor:
         """Push one token through the bank chain; return the final retrieval."""
-        x = tf.cast(token, tf.float32)
+        x = tf.cast(token, self.dtype)
         if int(x.shape[-1]) != self.dim:
             raise ValueError(f"token last dim {int(x.shape[-1])} != dim {self.dim}")
         for b in self.banks:
@@ -220,7 +232,7 @@ class ContinuumMemorySystem(tf.Module):
 
     def forward_sequence(self, tokens: tf.Tensor) -> tf.Tensor:
         """Apply :meth:`forward_step` to a sequence of shape ``(T, dim)``."""
-        tokens = tf.cast(tokens, tf.float32)
+        tokens = tf.cast(tokens, self.dtype)
         outs = []
         for t in range(int(tokens.shape[0])):
             outs.append(self.forward_step(tokens[t], t))

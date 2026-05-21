@@ -15,6 +15,8 @@ variant is just standard softmax attention anyway.
 
 from __future__ import annotations
 
+import warnings
+
 import tensorflow as tf
 from tensorflow import keras
 
@@ -139,6 +141,9 @@ class MiniTransformer(keras.Model):
         ``tolerance``. If no candidate clears the bar, returns the closest
         one. Param counts are computed analytically (no model construction
         inside the sweep) so the search is fast even on a wide grid.
+
+        The returned model has a ``matched_rel_error`` attribute giving the
+        achieved relative parameter-count error.
         """
         warm_T = min(int(hope_model.max_seq_len), 2)
         _ = hope_model(tf.zeros((1, warm_T), dtype=tf.int32))
@@ -179,6 +184,8 @@ class MiniTransformer(keras.Model):
                             mlp_ratio=mr,
                         )
                         _ = m(tf.zeros((1, min(max_seq_len, 2)), dtype=tf.int32))
+                        final_rel = abs(m.count_params() - target) / target
+                        m.matched_rel_error = float(final_rel)
                         return m
         if best_cfg is None:  # pragma: no cover - sweep grid is non-empty
             raise RuntimeError("matched_to: empty sweep grid")
@@ -192,6 +199,15 @@ class MiniTransformer(keras.Model):
             mlp_ratio=mr,
         )
         _ = m(tf.zeros((1, min(max_seq_len, 2)), dtype=tf.int32))
+        final_rel = abs(m.count_params() - target) / target
+        if final_rel > tolerance:
+            warnings.warn(
+                f"MiniTransformer.matched_to: could not meet tolerance={tolerance:.3f}; "
+                f"achieved rel_error={final_rel:.4f} "
+                f"(target params={target}, achieved={m.count_params()})",
+                stacklevel=2,
+            )
+        m.matched_rel_error = float(final_rel)
         return m
 
     def get_config(self):

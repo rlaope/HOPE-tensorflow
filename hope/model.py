@@ -108,6 +108,7 @@ class HOPE(keras.Model):
         return tf.stack(outs, axis=0)
 
     def call(self, x: tf.Tensor, training: bool = False) -> tf.Tensor:
+        """Forward pass. The ``training`` flag is accepted for Keras compatibility but is currently a no-op — this model has no dropout or batchnorm."""
         if x.shape.rank != 2:
             raise ValueError(f"HOPE expects rank-2 int input (B, T), got shape {x.shape}")
         T = tf.shape(x)[1]

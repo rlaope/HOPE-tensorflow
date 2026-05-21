@@ -42,8 +42,10 @@ class SelfModifyingLayer(keras.layers.Layer):
     "self-modifying" behaviour described in §8.1: the operator changes
     itself while processing a single sequence.
 
-    The most recent fast-weight tensor is exposed as ``self.last_fast`` for
-    inspection in tests.
+    Exposed on ``self.last_fast`` after each *eager* forward pass for
+    inspection (e.g. unit tests). In graph mode this is set to ``None``
+    because the value captured inside ``tf.while_loop`` is not safely
+    accessible. Do not depend on ``last_fast`` inside ``@tf.function`` code.
     """
 
     def __init__(
@@ -74,6 +76,9 @@ class SelfModifyingLayer(keras.layers.Layer):
         super().build(input_shape)
 
     def call(self, x: tf.Tensor) -> tf.Tensor:
+        if not tf.executing_eagerly():
+            # last_fast is only well-defined in eager mode — make the limitation loud.
+            self.last_fast = None
         if x.shape.rank != 3:
             raise ValueError(f"SelfModifyingLayer expects rank-3 input, got shape {x.shape}")
         k = tf.matmul(x, self.W_k)
@@ -170,8 +175,9 @@ class HopeAttention(keras.layers.Layer):
         scale = tf.cast(self.d_head, x.dtype) ** 0.5
         scores = tf.matmul(q, k, transpose_b=True) / scale  # (B, h, T, T)
 
-        causal = 1.0 - tf.linalg.band_part(tf.ones((T, T), dtype=x.dtype), -1, 0)
-        scores = scores - causal * tf.constant(1e9, dtype=x.dtype)
+        LARGE_NEG = scores.dtype.min / 2.0
+        mask = tf.linalg.band_part(tf.ones((T, T), dtype=tf.bool), -1, 0)
+        scores = tf.where(mask, scores, tf.cast(LARGE_NEG, scores.dtype))
 
         attn = tf.nn.softmax(scores, axis=-1)
         out = tf.matmul(attn, v)  # (B, h, T, d_head)
