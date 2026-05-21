@@ -49,6 +49,10 @@ class HOPE(keras.Model):
         cms_decays: per-bank multiplicative decay applied every step.
             Must match the length of ``cms_banks``.
         n_heads: number of attention heads in :class:`HopeAttention`.
+        use_pre_norm: if True, apply a LayerNorm to each residual block's
+            input. Disabled by default to stay byte-identical to the paper's
+            Figure 5 forward pass. Enable when stacking n_self_mod_layers > 1
+            to keep gradients stable.
         max_seq_len: maximum sequence length for the positional embedding.
         name: Keras model name.
     """
@@ -61,6 +65,7 @@ class HOPE(keras.Model):
         cms_banks: Sequence[int] = (1, 4),
         cms_decays: Sequence[float] = (0.01, 0.005),
         n_heads: int = 4,
+        use_pre_norm: bool = False,
         max_seq_len: int = 128,
         name: str = "hope",
     ) -> None:
@@ -73,6 +78,7 @@ class HOPE(keras.Model):
         self.d_model = int(d_model)
         self.max_seq_len = int(max_seq_len)
         self.n_heads = int(n_heads)
+        self.use_pre_norm = bool(use_pre_norm)
 
         self.token_embed = keras.layers.Embedding(self.vocab_size, self.d_model, name="tok_embed")
         self.pos_embed = keras.layers.Embedding(self.max_seq_len, self.d_model, name="pos_embed")
@@ -91,6 +97,13 @@ class HOPE(keras.Model):
         self.attn = HopeAttention(self.d_model, n_heads=self.n_heads, name="hope_attn")
         self.norm = keras.layers.LayerNormalization(name="norm")
         self.lm_head = keras.layers.Dense(self.vocab_size, use_bias=False, name="lm_head")
+        if self.use_pre_norm:
+            self.pre_norms_sm = [
+                keras.layers.LayerNormalization(name=f"pre_norm_sm_{i}")
+                for i in range(int(n_self_mod_layers))
+            ]
+            self.pre_norm_cms = keras.layers.LayerNormalization(name="pre_norm_cms")
+            self.pre_norm_attn = keras.layers.LayerNormalization(name="pre_norm_attn")
 
     def _apply_cms_per_sample(self, h: tf.Tensor) -> tf.Tensor:
         """Run the CMS chain once per batch element.
@@ -115,11 +128,14 @@ class HOPE(keras.Model):
         positions = tf.range(T)
         h = self.token_embed(x) + self.pos_embed(positions)  # (B, T, d)
 
-        for sm in self.self_mod_layers:
-            h = h + sm(h)  # residual around the self-modifying block
+        for i, sm in enumerate(self.self_mod_layers):
+            h_in = self.pre_norms_sm[i](h) if self.use_pre_norm else h
+            h = h + sm(h_in)  # residual around the self-modifying block
 
-        h = self._apply_cms_per_sample(h)  # (B, T, d)
-        h = h + self.attn(h)               # residual around attention
+        cms_in = self.pre_norm_cms(h) if self.use_pre_norm else h
+        h = self._apply_cms_per_sample(cms_in)  # (B, T, d)
+        attn_in = self.pre_norm_attn(h) if self.use_pre_norm else h
+        h = h + self.attn(attn_in)              # residual around attention
         h = self.norm(h)
         logits = self.lm_head(h)           # (B, T, vocab_size)
         return logits
@@ -132,5 +148,6 @@ class HOPE(keras.Model):
             "cms_banks": [b.update_every for b in self.cms.banks],
             "cms_decays": [b.decay for b in self.cms.banks],
             "n_heads": self.n_heads,
+            "use_pre_norm": self.use_pre_norm,
             "max_seq_len": self.max_seq_len,
         }
