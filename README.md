@@ -8,7 +8,7 @@
 
 A tensorflow implementation of *Nested Learning: The Illusion of Deep Learning Architectures* (Behrouz, Razaviyayn, Zhong, Mirrokni; Google Research; NeurIPS 2025). [arXiv:2512.24695](https://arxiv.org/abs/2512.24695)
 
-> Status: **All six phases done.** Repo holds runnable HOPE + parameter-matched MiniTransformer + three head-to-head benchmark scenarios + seven walkthrough notebooks.
+> Status: **study log + educational re-implementation.** Self-Modifying layer is currently linear-attention scale (paper Eq. 18); CMS is a single outer-product memory (not the MLP-chain of Eq. 70-71). See Limitations.
 
 > Local working directory is `hope-architecture/`; published repo and importable package are `HOPE-tensorflow` / `hope`.
 
@@ -99,7 +99,7 @@ A `(key, value)` pair planted at the start of the sequence, recall queried near 
 
 ### Continual LM (catastrophic forgetting)
 
-Train on TinyShakespeare (domain A), then on random alphabet sequences (domain B), then re-measure cross-entropy on A. Smaller before-vs-after gap = less forgetting.
+Train on TinyShakespeare (domain A), then on random alphabet sequences (domain B), then re-measure cross-entropy on A. The plot reports both the raw before/after loss on A *and* the standard continual-learning metrics from Lopez-Paz & Ranzato 2017: **BWT** (Backward Transfer; closer to 0 = less forgetting, in loss-space) and **ACC** (mean final-checkpoint loss across A and B; lower = better).
 
 ![continual](assets/bench_continual.png)
 
@@ -110,6 +110,17 @@ Train on TinyShakespeare (domain A), then on random alphabet sequences (domain B
 ![incontext](assets/bench_incontext.png)
 
 These plots use tiny models and tiny training budgets — the *shape* of the comparison is the takeaway, not the absolute numbers.
+
+---
+
+## Limitations
+
+- **Self-Modifying layer** is implemented as linear attention with a Hebbian fast-weight update (paper Eq. 18), NOT the full Self-Referential Titans of paper §8.1 / Eq. 94-97.
+- **CMS** is a single `dim×dim` outer-product memory, NOT the MLP chain of paper §7.1 / Eq. 70-71. Nested / Sequential / Head-wise CMS variants are not implemented.
+- **M3 (Multi-scale Momentum Muon)** optimizer from paper §7.2 is not implemented.
+- **DGD / DeepOptimizer** classes exist in `hope/optimizers.py` but `scripts/train.py` uses Adam — they are reference/study implementations, not currently wired into training.
+- **Benchmarks** use tiny vocab/seq (`d_model=32`, `vocab=8`) and TinyShakespeare only. No RULER / BABILong / WikiText / CLINC evaluation.
+- **Educational scope** — see "Hardware" section.
 
 ---
 
@@ -144,6 +155,7 @@ jupyter nbconvert --to notebook --execute --inplace notebooks/*.ipynb
 | 4 | `MiniTransformer` baseline + `DGD` / `DeepOptimizer` + `scripts/train.py` + char-level loaders | done |
 | 5 | Three-scenario benchmark + assets/*.png | done |
 | 6 | Documentation polish, notebook 01, final push | done |
+| 7+ | Paper-faithful pass: Self-Mod Eq. 94-97, MLP-chain CMS (Eq. 70-71), M3 optimizer, standard benches (RULER / BABILong) | not started — see Limitations |
 
 ---
 

@@ -19,6 +19,11 @@ The two classes here are intentionally framework-light: plain Python
 objects with a single ``apply_gradients`` method, so they slot into a
 ``tf.GradientTape`` loop without depending on Keras 3's Optimizer base
 class.
+
+NOTE: NOT WIRED INTO scripts/train.py — these classes are reference
+implementations of the paper's optimizer ideas (Algorithm 1 sketch).
+The training loop uses Adam. To exercise them, instantiate manually in
+a notebook.
 """
 
 from __future__ import annotations
@@ -31,6 +36,8 @@ import tensorflow as tf
 class DGD:
     """SGD with explicit weight decay, framed as a didactic stand-in
     for the paper's Delta Gradient Descent (DGD, §4.5).
+
+    NOT WIRED INTO scripts/train.py — reference implementation only; instantiate manually to experiment.
 
     Update rule (echoes Eq. 31 plus the ``(k k^T) M`` decay term that
     appears in the self-referential Titans update of Eq. 88)::
@@ -58,6 +65,8 @@ class DGD:
 
 class DeepOptimizer:
     """Momentum optimizer treating the momentum buffer as an associative memory.
+
+    NOT WIRED INTO scripts/train.py — reference implementation only; instantiate manually to experiment.
 
     Reference: §4.2, Eq. 33 - 34. The update rule is the standard
     Polyak / Nesterov form, but the momentum buffer ``m`` is explicitly

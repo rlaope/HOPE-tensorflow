@@ -92,11 +92,34 @@ def _eval_mean_loss(model, batches, max_batches: int = 5) -> float:
     return float(np.mean(losses)) if losses else float("nan")
 
 
+def _longctx_masked_loss(logits: tf.Tensor, y: tf.Tensor, query_pos: int) -> tf.Tensor:
+    # Loss masked to query position only — filler positions are ignored so the
+    # model cannot trivially copy the answer from nearby input tokens.
+    B = tf.shape(logits)[0]
+    idx = tf.fill([B], query_pos)                          # (B,)
+    logits_q = tf.gather(logits, idx, batch_dims=1)        # (B, vocab)
+    y_q = tf.gather(y, idx, batch_dims=1)                  # (B,)
+    return tf.reduce_mean(
+        tf.keras.losses.sparse_categorical_crossentropy(y_q, logits_q, from_logits=True)
+    )
+
+
 def scenario_longctx(args) -> dict:
-    """Plant a (key, value) pair at the start, query it near the end.
+    """Needle-in-a-haystack (key, value) recall with no data leak.
+
+    Layout (positions in the input sequence):
+      0: key_id          <- planted key
+      1: val_id          <- planted value (only occurrence in input)
+      2 .. -2: filler    <- tokens drawn from a DIFFERENT id range so val_id
+                            never accidentally appears in the filler
+      -1: key_id         <- query; model must output val_id here
+
+    The answer (val_id) does NOT appear in the input at or after the query
+    position, so attention cannot shortcut by copying a nearby token.
+    Loss is masked to position -1 (the query position) only.
 
     Metric: mean probability the model assigns to ``val_id`` at the
-    recall position. Softer than argmax accuracy so the comparison is
+    query position. Softer than argmax accuracy so the comparison is
     visible on a tiny CPU-friendly training budget.
     """
     vocab = 8
@@ -114,15 +137,24 @@ def scenario_longctx(args) -> dict:
         rng = np.random.default_rng(seed)
         for seq_len in args.longctx_seq_lens:
             B = args.batch_size
+            # Keys occupy ids 1-3; values occupy ids 4-7 — disjoint ranges so
+            # filler (drawn from 1-3) cannot accidentally equal val_id.
             key_id = int(rng.integers(1, 4))
             val_id = int(rng.integers(4, vocab))
-            x = rng.integers(0, 4, size=(B, seq_len), dtype=np.int32)
-            x[:, 0] = key_id
-            x[:, 1] = val_id
-            x[:, -2] = key_id
-            x[:, -1] = val_id
+            # Filler from key range only — val_id never appears after pos 1.
+            x = rng.integers(1, 4, size=(B, seq_len), dtype=np.int32)
+            x[:, 0] = key_id   # plant key
+            x[:, 1] = val_id   # plant value (only occurrence)
+            x[:, -1] = key_id  # query — answer NOT placed here in input
+
+            # Target: only position -1 matters (val_id); rest can be anything
+            # but we keep x-shifted targets for filler positions so the tensor
+            # shape is consistent. Only the query position loss is used.
+            y = x.copy()
+            y[:, -1] = val_id  # correct answer at query position
             x_t = tf.constant(x, dtype=tf.int32)
-            y_t = x_t
+            y_t = tf.constant(y, dtype=tf.int32)
+            query_pos = seq_len - 1
 
             for name in ("hope", "transformer"):
                 if name == "hope":
@@ -135,11 +167,11 @@ def scenario_longctx(args) -> dict:
                 for _ in range(args.longctx_train_steps):
                     with tf.GradientTape() as tape:
                         logits = model(x_t)
-                        loss = _ce_loss(logits, y_t)
+                        loss = _longctx_masked_loss(logits, y_t, query_pos)
                     grads = tape.gradient(loss, model.trainable_variables)
                     opt.apply_gradients(zip(grads, model.trainable_variables))
                 logits = model(x_t)
-                probs = tf.nn.softmax(logits[:, -2, :], axis=-1).numpy()
+                probs = tf.nn.softmax(logits[:, query_pos, :], axis=-1).numpy()
                 prob_correct = float(np.mean(probs[:, val_id]))
                 prob_correct_per_seed[name][seq_len].append(prob_correct)
                 print(
@@ -182,7 +214,13 @@ def scenario_longctx(args) -> dict:
 
 
 def scenario_continual(args) -> dict:
-    """Train on domain A (TinyShakespeare), then B (random), re-eval A."""
+    """Train on domain A (TinyShakespeare), then B (random), re-eval A.
+
+    Reports BWT and ACC as defined in Lopez-Paz & Ranzato 2017 (GEM).
+    For a 2-task (A→B) setup:
+      BWT = R[B,A] - R[A,A]   (negative-loss proxy; more negative = more forgetting)
+      ACC = mean of final-checkpoint loss on A and B
+    """
     ds_a, vocab_a = get_tinyshakespeare(seq_len=args.seq_len, batch_size=args.batch_size)
     n_heads = 2
     d_model = 32
@@ -192,6 +230,9 @@ def scenario_continual(args) -> dict:
         "hope": [],
         "transformer": [],
     }
+    # BWT/ACC per seed: Lopez-Paz & Ranzato 2017, GEM
+    bwt_per_seed: dict[str, list[float]] = {"hope": [], "transformer": []}
+    acc_per_seed: dict[str, list[float]] = {"hope": [], "transformer": []}
 
     for seed in range(args.n_seeds):
         _set_seed(seed)
@@ -209,15 +250,31 @@ def scenario_continual(args) -> dict:
                 model = _build_matched_baseline(ref)
             _ = model(tf.zeros((1, args.seq_len), dtype=tf.int32))
             _train_on_batches(model, ds_a, args.steps, args.lr)
+            # R[A,A]: eval on A right after training on A
             loss_a_before_b = _eval_mean_loss(model, ds_a, max_batches=5)
             _train_on_batches(model, ds_b, args.steps, args.lr)
+            # R[B,A]: eval on A after subsequently training on B
             loss_a_after_b = _eval_mean_loss(model, ds_a, max_batches=5)
+            # R[B,B]: eval on B at final checkpoint (for ACC)
+            loss_b_after_b = _eval_mean_loss(model, ds_b, max_batches=5)
             loss_pairs_per_seed[name].append((loss_a_before_b, loss_a_after_b))
+
+            # BWT in loss space: positive = forgetting (higher loss on A after B)
+            # Lopez-Paz & Ranzato 2017, GEM — BWT = R[T,i] - R[i,i] per task i
+            bwt = loss_a_after_b - loss_a_before_b
+            # ACC = mean final-checkpoint loss over all tasks (lower = better)
+            acc = (loss_a_after_b + loss_b_after_b) / 2.0
+            bwt_per_seed[name].append(bwt)
+            acc_per_seed[name].append(acc)
             print(
-                f"[continual] seed={seed} {name}: lossA before={loss_a_before_b:.3f} after={loss_a_after_b:.3f}"
+                f"[continual] seed={seed} {name}: lossA before={loss_a_before_b:.3f}"
+                f" after={loss_a_after_b:.3f} | BWT={bwt:+.3f} ACC={acc:.3f}"
             )
 
-    fig, ax = plt.subplots(figsize=(7, 4))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    ax_loss, ax_metrics = axes
+
+    # Left: before/after bar chart (original)
     x_axis = np.arange(2)
     width = 0.35
     for name, offset in (("hope", -width / 2), ("transformer", width / 2)):
@@ -228,7 +285,7 @@ def scenario_continual(args) -> dict:
         mean_after = float(np.mean(afters))
         std_before = float(np.std(befores))
         std_after = float(np.std(afters))
-        ax.bar(
+        ax_loss.bar(
             x_axis + offset,
             [mean_before, mean_after],
             width,
@@ -236,11 +293,35 @@ def scenario_continual(args) -> dict:
             capsize=3,
             label=name,
         )
-    ax.set_xticks(x_axis)
-    ax.set_xticklabels(["A loss (before B)", "A loss (after B)"])
-    ax.set_ylabel("cross-entropy on domain A")
-    ax.set_title("Continual LM: domain-A loss before / after training on B")
-    ax.legend()
+    ax_loss.set_xticks(x_axis)
+    ax_loss.set_xticklabels(["A loss (before B)", "A loss (after B)"])
+    ax_loss.set_ylabel("cross-entropy on domain A")
+    ax_loss.set_title("Continual LM: domain-A loss before / after training on B")
+    ax_loss.legend()
+
+    # Right: BWT and ACC grouped bar chart
+    metric_names = ["BWT (loss↑=forget)", "ACC (mean final loss)"]
+    x_metrics = np.arange(len(metric_names))
+    for name, offset in (("hope", -width / 2), ("transformer", width / 2)):
+        mean_bwt = float(np.mean(bwt_per_seed[name]))
+        std_bwt = float(np.std(bwt_per_seed[name]))
+        mean_acc = float(np.mean(acc_per_seed[name]))
+        std_acc = float(np.std(acc_per_seed[name]))
+        ax_metrics.bar(
+            x_metrics + offset,
+            [mean_bwt, mean_acc],
+            width,
+            yerr=[std_bwt, std_acc],
+            capsize=3,
+            label=name,
+        )
+    ax_metrics.axhline(0, linestyle="--", color="gray", alpha=0.5)
+    ax_metrics.set_xticks(x_metrics)
+    ax_metrics.set_xticklabels(metric_names)
+    ax_metrics.set_ylabel("loss (lower = better; BWT closer to 0 = less forgetting)")
+    ax_metrics.set_title("BWT & ACC (Lopez-Paz & Ranzato 2017)")
+    ax_metrics.legend()
+
     fig.tight_layout()
     out = os.path.join(ASSETS_DIR, "bench_continual.png")
     fig.savefig(out, dpi=110)
@@ -250,9 +331,23 @@ def scenario_continual(args) -> dict:
         "n_seeds": args.n_seeds,
         "results": {
             name: [
-                {"before": p[0], "after": p[1]}
-                for p in loss_pairs_per_seed[name]
+                {
+                    "before": p[0],
+                    "after": p[1],
+                    "bwt": bwt_per_seed[name][i],
+                    "acc": acc_per_seed[name][i],
+                }
+                for i, p in enumerate(loss_pairs_per_seed[name])
             ]
+            for name in ("hope", "transformer")
+        },
+        "summary": {
+            name: {
+                "mean_bwt": float(np.mean(bwt_per_seed[name])),
+                "std_bwt": float(np.std(bwt_per_seed[name])),
+                "mean_acc": float(np.mean(acc_per_seed[name])),
+                "std_acc": float(np.std(acc_per_seed[name])),
+            }
             for name in ("hope", "transformer")
         },
     }
