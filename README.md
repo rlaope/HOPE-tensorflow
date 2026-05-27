@@ -1,5 +1,11 @@
 # HOPE-tensorflow
 
+<p align="center">
+  <img src="assets/paper_fig1_brain_nested.png" alt="Nested Learning — brain analogy and multi-frequency update" width="820"/>
+  <br/>
+  <em>Figure 1 of the paper: the brain's uniform / reusable structure and multi-time-scale updates motivate Nested Learning.</em>
+</p>
+
 A tensorflow implementation of *Nested Learning: The Illusion of Deep Learning Architectures* (Behrouz, Razaviyayn, Zhong, Mirrokni; Google Research; NeurIPS 2025). [arXiv:2512.24695](https://arxiv.org/abs/2512.24695)
 
 > Status: **All six phases done.** Repo holds runnable HOPE + parameter-matched MiniTransformer + three head-to-head benchmark scenarios + seven walkthrough notebooks.
@@ -9,6 +15,12 @@ A tensorflow implementation of *Nested Learning: The Illusion of Deep Learning A
 ---
 
 ## Why this repo
+
+<p align="center">
+  <img src="assets/paper_fig5_hope_vs_transformer.png" alt="HOPE vs Transformer backbone (paper Figure 5)" width="900"/>
+  <br/>
+  <em>Figure 5 of the paper: HOPE's Self-Modifying Titans → multi-frequency FFN stack vs the standard Transformer Attention → FFN stack. This repo implements the left-hand side.</em>
+</p>
 
 HOPE pairs the *Nested Learning* paradigm with a recurrent backbone: a self-modifying layer plus a **Continuum Memory System (CMS)** that updates memory banks at multiple frequencies. PyTorch reimplementations exist; this repo fills the TF / Keras gap and doubles as a study log.
 
