@@ -50,15 +50,14 @@
 <section class="hero">
   <canvas id="osc" aria-hidden="true"></canvas>
   <div class="hero-inner wrap">
-    <p class="eyebrow" data-lang-block="ko">읽기 위한 안내서 · 한국어 / English</p>
-    <p class="eyebrow" data-lang-block="en">A reader's guide · English / 한국어</p>
-
     <div data-lang-block="ko">
       <h1><span class="il">Nested Learning</span> — 구현 및 학습</h1>
+      <p class="eyebrow" style="color:var(--accent-2);margin:.2rem 0 1.3rem">HOPE 아키텍처 · HOPE-tensorflow 구현</p>
       <p class="lede">연상 기억이라는 하나의 벽돌에서 출발해, 옵티마이저와 어텐션과 MLP가 사실은 같은 것의 다른 주파수였다는 결론까지. HOPE 아키텍처와 <em>Nested Learning</em> 논문을 코드와 나란히 읽습니다.</p>
     </div>
     <div data-lang-block="en">
       <h1><span class="il">Nested Learning</span> — Implementation &amp; Study</h1>
+      <p class="eyebrow" style="color:var(--accent-2);margin:.2rem 0 1.3rem">The HOPE architecture · HOPE-tensorflow</p>
       <p class="lede">From a single building block — associative memory — to the claim that optimizers, attention, and MLPs are the same thing running at different frequencies. We read the HOPE architecture and the <em>Nested Learning</em> paper next to the code that implements it.</p>
     </div>
 
@@ -69,6 +68,10 @@
     <div class="meta" style="margin-top:.5rem">
       <span data-lang-block="ko">구현</span><span data-lang-block="en">Implementation</span>
       <a href="https://github.com/rlaope/HOPE-tensorflow" target="_blank" rel="noopener">HOPE-tensorflow (TensorFlow / Keras)</a>
+    </div>
+    <div class="meta" style="margin-top:.5rem">
+      <span data-lang-block="ko">글 · 구현</span><span data-lang-block="en">Written &amp; built by</span>
+      <a href="https://github.com/rlaope" target="_blank" rel="noopener">rlaope — github.com/rlaope</a>
     </div>
 
     <div class="cta">
@@ -83,6 +86,89 @@
 <div class="shell">
 <main>
 <article class="wrap prose">
+
+<!-- ====================================================== 0. BEFORE YOU BEGIN -->
+<section class="chapter reveal" id="before">
+  <div data-lang-block="ko">
+    <p class="chapter-no">들어가며 · 개요</p>
+    <h2>시작하기 전에</h2>
+    <p class="lead">이 글이 무엇인지, 무엇을 미리 알면 좋은지, 그리고 다 읽고 나면 무엇을 손에 쥐게 되는지를 먼저 짚고 넘어갑니다.</p>
+
+    <p>이 글은 <em>Nested Learning: The Illusion of Deep Learning Architectures</em>(Behrouz 외, NeurIPS 2025) 논문과 그 핵심 모델인 <strong>HOPE</strong>를, <a class="inline" href="https://github.com/rlaope/HOPE-tensorflow" target="_blank" rel="noopener">HOPE-tensorflow</a> 저장소의 실제 구현 코드와 나란히 놓고 처음부터 끝까지 따라 읽는 안내서입니다. 논문의 추상적인 수식이 코드의 어느 줄로 살아나는지를 한 단계씩 보여 주는 것이 목표입니다. 모두 13개의 장으로, 가장 작은 개념인 연상 기억에서 출발해 부품을 하나씩 쌓아 올린 다음, 마지막에 HOPE 한 대를 조립하고 실험으로 확인하는 순서로 이어집니다.</p>
+
+    <div class="cards three">
+      <div class="card2">
+        <span class="num">개요</span>
+        <h4>이 글은 무엇인가</h4>
+        <p>논문 한 편을 코드와 함께 읽는 해설서입니다. 이론만 있는 논문도, 설명 없는 코드도 아닌, 둘 사이의 다리를 놓는 것이 목적입니다. 수식이 나올 때마다 그 수식이 되는 코드 한 줄을 짝지어 보여 줍니다.</p>
+      </div>
+      <div class="card2">
+        <span class="num">사전 지식</span>
+        <h4>이만큼만 알면 됩니다</h4>
+        <ul>
+          <li>벡터·행렬과 행렬-벡터 곱이 무엇인지 정도의 선형대수</li>
+          <li>가중치·손실·경사하강법으로 신경망을 학습한다는 큰 그림 (세부는 본문에서 다시 풀어 줍니다)</li>
+          <li>트랜스포머·어텐션에 대한 가벼운 친숙함이 있으면 8장이 편하지만 필수는 아닙니다</li>
+          <li>코드를 직접 돌려 보려면 Python·TensorFlow 기본기 (읽기만 한다면 한 줄씩 해설하므로 없어도 됩니다)</li>
+        </ul>
+      </div>
+      <div class="card2">
+        <span class="num">학습 목표</span>
+        <h4>다 읽고 나면</h4>
+        <ul>
+          <li>옵티마이저·어텐션·MLP를 <em>연상 기억</em> 하나로 꿰뚫어 보게 됩니다</li>
+          <li>Hebbian·Delta·Oja 세 학습 규칙의 차이를 수식과 코드로 구분합니다</li>
+          <li>자기수정 층이 한 문장 안에서 스스로를 고치는 원리를 이해합니다</li>
+          <li>CMS가 다중 주파수로 치명적 망각을 막는 방식을 설명할 수 있습니다</li>
+          <li>HOPE를 그림 5대로 조립하는 전 과정을 따라갈 수 있습니다</li>
+          <li>구현이 논문의 어디까지 충실하고 어디서 단순화했는지 가늠하게 됩니다</li>
+        </ul>
+      </div>
+    </div>
+
+    <p>새로 나오는 개념 — 연상 기억, 빠른 가중치, 연속체 기억 시스템 — 은 모두 본문에서 바닥부터 설명하니, 모르는 용어가 보여도 걱정하지 않으셔도 됩니다. 준비가 되었다면, 오늘날의 모델이 안고 있는 이상한 결핍에서 이야기를 시작하겠습니다.</p>
+  </div>
+
+  <div data-lang-block="en">
+    <p class="chapter-no">Getting started · Overview</p>
+    <h2>Before you begin</h2>
+    <p class="lead">First, what this guide is, what helps to know going in, and what you will walk away holding.</p>
+
+    <p>This guide reads the paper <em>Nested Learning: The Illusion of Deep Learning Architectures</em> (Behrouz et al., NeurIPS 2025) and its core model <strong>HOPE</strong> from start to finish, side by side with the actual implementation in the <a class="inline" href="https://github.com/rlaope/HOPE-tensorflow" target="_blank" rel="noopener">HOPE-tensorflow</a> repository. The goal is to show, step by step, which line of code each abstract equation becomes. Across thirteen chapters, it starts from the smallest concept — associative memory — stacks up the parts one at a time, and finally assembles one HOPE and checks it with experiments.</p>
+
+    <div class="cards three">
+      <div class="card2">
+        <span class="num">Overview</span>
+        <h4>What this is</h4>
+        <p>A companion that reads one paper together with its code. Neither a theory-only paper nor unexplained code — its purpose is to bridge the two. Whenever an equation appears, it is paired with the line of code it becomes.</p>
+      </div>
+      <div class="card2">
+        <span class="num">Prerequisites</span>
+        <h4>This much is enough</h4>
+        <ul>
+          <li>Linear algebra at the level of vectors, matrices, and the matrix&#8211;vector product</li>
+          <li>The big picture of training a network with weights, loss, and gradient descent (details are unpacked in the text)</li>
+          <li>Light familiarity with Transformers/attention helps in Chapter 8, but is not required</li>
+          <li>Basic Python/TensorFlow to run the code (not needed to just read — every line is explained)</li>
+        </ul>
+      </div>
+      <div class="card2">
+        <span class="num">Outcomes</span>
+        <h4>By the end you will</h4>
+        <ul>
+          <li>See optimizers, attention, and MLPs through the single lens of <em>associative memory</em></li>
+          <li>Tell the Hebbian, Delta, and Oja rules apart in both math and code</li>
+          <li>Understand how a self-modifying layer rewrites itself within one sentence</li>
+          <li>Explain how CMS resists catastrophic forgetting via multiple frequencies</li>
+          <li>Follow the full assembly of HOPE as in Figure 5</li>
+          <li>Judge where the implementation is faithful to the paper and where it simplifies</li>
+        </ul>
+      </div>
+    </div>
+
+    <p>Every new concept — associative memory, fast weights, the continuum memory system — is explained from the ground up in the text, so don't worry if a term looks unfamiliar. If you are ready, we begin with the strange deficiency that today's models carry.</p>
+  </div>
+</section>
 
 <!-- ====================================================== 1. PROLOGUE -->
 <section class="chapter reveal" id="prologue">
@@ -1011,6 +1097,7 @@ jupyter nbconvert --to notebook --execute --inplace notebooks/*.ipynb</code></pr
   <nav class="toc-sticky">
     <div class="toc-h" data-lang-block="ko">목차</div>
     <div class="toc-h" data-lang-block="en">Contents</div>
+    <a href="#before"><span class="tnum">00</span><span data-lang-block="ko">시작하기 전에</span><span data-lang-block="en">Before you begin</span></a>
     <a href="#prologue"><span class="tnum">01</span><span data-lang-block="ko">현재만을 사는 모델</span><span data-lang-block="en">A model in the present</span></a>
     <a href="#nested"><span class="tnum">02</span><span data-lang-block="ko">중첩 학습이라는 렌즈</span><span data-lang-block="en">Nested Learning lens</span></a>
     <a href="#memory"><span class="tnum">03</span><span data-lang-block="ko">연상 기억</span><span data-lang-block="en">Associative memory</span></a>
@@ -1032,10 +1119,10 @@ jupyter nbconvert --to notebook --execute --inplace notebooks/*.ipynb</code></pr
   <div class="wrap">
     <div>
       <div data-lang-block="ko"><strong>HOPE · Nested Learning 읽기 안내서</strong><br>
-        <a href="https://github.com/rlaope/HOPE-tensorflow" target="_blank" rel="noopener">HOPE-tensorflow 저장소</a> · MIT 라이선스<br>
+        글·구현 <a href="https://github.com/rlaope" target="_blank" rel="noopener"><strong>rlaope</strong></a> · <a href="https://github.com/rlaope/HOPE-tensorflow" target="_blank" rel="noopener">HOPE-tensorflow 저장소</a> · MIT 라이선스<br>
         본문은 학습용 해설이며, 권위 있는 출처는 항상 원 논문입니다.</div>
       <div data-lang-block="en"><strong>HOPE · A reader's guide to Nested Learning</strong><br>
-        <a href="https://github.com/rlaope/HOPE-tensorflow" target="_blank" rel="noopener">HOPE-tensorflow repository</a> · MIT License<br>
+        Written &amp; implemented by <a href="https://github.com/rlaope" target="_blank" rel="noopener"><strong>rlaope</strong></a> · <a href="https://github.com/rlaope/HOPE-tensorflow" target="_blank" rel="noopener">HOPE-tensorflow repository</a> · MIT License<br>
         This text is an educational companion; the authoritative source is always the paper.</div>
     </div>
     <div>
